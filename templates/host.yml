@@ -1,0 +1,319 @@
+#- setup variable for cluster installation
+
+########################################################
+# current_version ("2.0.0", "2.0.1", "2.0.2", "2.1.0", "2.1.1", "2.1.2", "2.1.3", "2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.2.4", "2.2.5", "2.3.0", "2.3.1", "2.3.2", "2.3.3", "2.4.0")
+########################################################
+current_version: "{{ currnet_version.stdout }}"
+minor_upgrade: "no"
+
+########################################################
+# Master configuation
+########################################################
+cluster_name: "{{ cluster_name.stdout }}"
+master_host_name: "{{ set_master1_hostname }}"
+master_ip: {{ ansible_facts['default_ipv4']['address'] }}
+
+acc_interface: {{ acc_interface }}
+########################################################
+# 3master mode( yes / no )
+########################################################
+{% if set_master_mode or set_keepalived %}
+master_mode: "yes"
+master2_ip: {{ set_master2_ip |default('10.140.0.5')}}
+master3_ip: {{ set_master3_ip |default('10.140.0.6')}}
+master2_hostname: "{{ set_master2_hostname | default('acc-master2') }}"
+master3_hostname: "{{ set_master3_hostname | default('acc-master3') }}"
+# L4_mode ( L4 / haproxy )
+L4_mode: "{{ set_L4_mode | default(haproxy)}}"
+haproxy_port: {{ set_haproxy_port | default(8443)}}
+keep_vip: {{ set_keep_vip | default("")}}
+# Set it up if you want to add the master server later
+# If master_mode is "no", it will not work.
+# single_option( yes / no )
+{% if set_single_option %}
+single_option: "yes"
+{% else %}
+single_option: "no"
+{% endif %}
+{% else %}
+master_mode: "no"
+master2_ip: 10.140.0.5
+master3_ip: 10.140.0.6
+master2_hostname: "acc-master2"
+master3_hostname: "acc-master3"
+# L4_mode ( L4 / haproxy )
+L4_mode: "haproxy"
+haproxy_port: 8443
+keep_vip: 10.140.0.10
+# Set it up if you want to add the master server later
+# If master_mode is "no", it will not work.
+# single_option( yes / no )
+single_option: "no"
+{% endif %}
+
+########################################################
+## container_name (containerd & cri-o)
+########################################################
+container_option: "{{ set_cri }}"
+
+# container_option (containerd)
+{% if (set_cri == "containerd") and set_enable_selinux %}
+selinux_enable: "yes"
+{% else %}
+selinux_enable: "no"
+{% endif %}
+
+# container_option (cri-o)
+{% if set_pid_limit is defined  %}
+pid_limit: "{{ set_pid_limit }}"
+{% else %}
+pid_limit: "4096"
+{% endif %}
+
+########################################################
+# storage setting
+########################################################
+# storage_option ( nfs / ceph )
+storage_option: "{{ set_storage_option }}"
+
+# nfs_setup ( internal / external )
+{% if set_single_option is defined %}
+nfs_setup: "{{ set_nfs_setup }}"
+{% else %}
+nfs_setup: "internal"
+{% endif %}
+{% if set_nfs_server_ip is defined %}
+nfs_server_ip: "{{ set_nfs_server_ip }}"
+{% else %}
+nfs_server_ip: 10.20.0.1
+{% endif %}
+{% if set_accordion_nfs_path is defined %}
+accordion_nfs_path: "{{ set_accordion_nfs_path }}"
+{% else %}
+accordion_nfs_path: "/nfs/data"
+{% endif %}
+
+# nfs_version ( v3 / v4 )
+{% if set_nfs_version is defined %}
+nfs_version: {{ set_nfs_version }}
+{% else %}
+nfs_version: "v3"
+{% endif %}
+
+# ceph_option ( cephfs / rbd )
+{% if set_storage_option == "ceph" %}
+ceph_option: "{{ set_ceph_option }}"
+
+#ceph health, ceph fsid, ceph auth get-key client.admin, ceph status
+ceph_server_ip: "{{ ceph_server_ip.stdout }}"
+ceph_server_port: "{{ ceph_server_port.stdout }}"
+ceph_id: "{{ ceph_id.stdout }}"
+ceph_key: "{{ ceph_key.stdout }}"
+ceph_fsid: "{{ ceph_fsid.stdout }}"
+ceph_fsname: "{{ ceph_fsname.stdout }}"
+{% else %}
+ceph_option: "cephfs"
+
+#ceph health, ceph fsid, ceph auth get-key client.admin, ceph status
+ceph_server_ip: "10.20.200.107"
+ceph_server_port: "6789"
+ceph_id: "admin"
+ceph_key: "AQCKoqVh0eR5MxAAL4WziV7oyVsdtHC6Wz0RcQ=="
+#ceph_id: "kubernetes"
+#ceph_key: "AQBDpKVhFhPCIRAAf1xqSLgi558DIH+FvcCyMQ=="
+ceph_fsid: "84ab6f51-d13e-4a83-9ccc-fd3b9228e728"
+ceph_fsname: "cephfs"
+#ceph_fsname: "cephrbd_pool"
+{% endif %}
+
+########################################################
+# etcd external option
+########################################################
+{% if set_etcd_external %}
+etcd_external: "yes"
+{% else %}
+etcd_external: "no"
+{% endif %}
+
+########################################################
+# base registry
+########################################################
+# accordion_registry_option ( local / external )
+base_registry_option: "{{ set_base_registry_option }}"
+{% if set_domain_option %}
+base_registry_address: {{ ansible_facts['default_ipv4']['address'] }}
+{% if registry_address_domain.stdout | length %}
+base_registry_port: {{ registry_port_domain.stdout }}
+{% else %}
+base_registry_port: {{ registry_port_domain2.stdout }}
+{% endif %}
+{% else %}
+base_registry_address: {{ registry_address.stdout }}
+base_registry_port: {{ registry_port.stdout }}
+{% endif %}
+base_registry_id: accregistry
+base_registry_passwd: accordionadmin
+
+########################################################
+# user registry
+########################################################
+# registry_option ( registry / harbor)
+user_registry_option: "{{ set_user_registry_option }}"
+{% if set_domain_option %}
+user_registry_address: {{ ansible_facts['default_ipv4']['address'] }}
+user_registry_port: {{ user_registry_port.stdout }}
+{% else %}
+{% if set_user_registry|length %}
+user_registry_address: {{ set_user_registry }}
+user_registry_port: {{ user_registry_port.stdout }}
+{% else %}
+user_registry_address: {{ user_registry2.stdout }}
+user_registry_port: {{ user_registry_port2.stdout }}
+{% endif %}
+{% endif %}
+
+# registry_external ( yes / no )
+{% if set_user_registry_external %}
+user_registry_external: "no"
+{% else %}
+user_registry_external: "yes"
+{% endif %}
+
+# user_registry_external: "yes"
+user_registry_id: {{ user_registry_id.stdout }}
+user_registry_pw: {{ user_registry_pw.stdout }}
+
+# registry information
+htpasswd_option: "yes"
+
+#######################################################
+# registry domain option
+########################################################
+# registry_domain_option ( yes / no )
+{% if set_domain_option %}
+registry_domain_option: "yes"
+{% if registry_address_domain.stdout | length %}
+base_registry_domain_address: "{{ registry_address_domain.stdout }}"
+{% else %}
+base_registry_domain_address: "{{ registry_address_domain2.stdout }}"
+{% endif %}
+user_registry_domain_address: "{{ set_user_registry }}"
+{% else %}
+registry_domain_option: "no"
+base_registry_domain_address: "base.registry.accordions.co.kr"
+user_registry_domain_address: "user.registry.accordions.co.kr"
+{% endif %}
+# hosts_setting( yes / no )
+# If the value 'host_setting' is yes, the domain is added to /etc/hosts
+# (Not working if 'registry_domain_option' is no)
+hosts_setting: "yes"
+
+########################################################
+# Network Setting
+########################################################
+# CNI (calico or weave)
+network_cni: "{{ cni.stdout }}"
+# podman Network
+podman_cidr: "{{ podman_cidr.stdout }}"
+
+{% if cni.stdout == "weave" %}
+{% else %}
+IPALLOC_RANGE: "172.32.0.0/12"
+{% endif %}
+# Pod Network (calico)
+pod_network_cidr: "{{ pod_network_cidr.stdout }}"
+
+# Calico Mode (IPIP & vxlan)
+{% if cni.stdout == "calico" %}
+calico_backend: "{{ set_calico_backend }}"
+
+# Calico ippool(CrossSubnet & Always)
+calico_ippool: "{{ calico_ippool.stdout }}"
+
+# Calico autodetection mode( interface / cidr )
+# If the option is 'interface', it follows the value set in acc_interface.
+calico_autodetection_mode: {{ set_calico_autodetection_mode }}
+# If the option is 'cidr', set the value 'interface_cidr' to OS interface cidr.
+{% if set_calico_autodetection_mode == "cidr" %}
+interface_cidr: "{{ interface_cidr.stdout }}"
+{% else %}
+interface_cidr: "10.20.0.0/16"
+{% endif %}
+{% else %}
+calico_backend: "IPIP"
+# Calico ippool(CrossSubnet & Always)
+calico_ippool: "CrossSubnet"
+# Calico autodetection mode( interface / cidr )
+# If the option is 'interface', it follows the value set in acc_interface.
+calico_autodetection_mode: "interface"
+# If the option is 'cidr', set the value 'interface_cidr' to OS interface cidr.
+interface_cidr: "10.20.0.0/16"
+{% endif %}
+
+# kubernetes Service Network
+service_cidr: "{{ service_cidr.stdout }}"
+kubelet_clusterdns: "{{ kubelet_clusterdns.stdout }}"
+kubernetes_clusterip: "{{ kubernetes_clusterip.stdout }}"
+
+# proxy_mode( iptables / ipvs )
+proxy_mode: {{ set_proxy_mode }}
+# iptables_install( yes / no )
+iptables_install: "no"
+
+########################################################
+## container dir
+########################################################
+{% if cri.stdout == "containerd" %}
+containerd_root_dir: {{ containerd_root_dir.stdout }}
+{% else %}
+containerd_root_dir: /var/lib/containerd
+{% endif %}
+containers_storage_runroot: {{ containers_storage_runroot.stdout }}
+containers_storage_volume: {{ containers_storage_volume.stdout }}
+
+########################################################
+## Kubernetes dir
+########################################################
+kubelet_root_dir: /var/lib/kubelet
+kube_addon_dir: /etc/kubernetes/addon
+docker_rpm_dir: /tmp
+
+########################################################
+# If the external IP is set up on the master server, enter the IP.
+########################################################
+master_external_ip: {{ set_external_ip }}
+
+########################################################
+## Add node option (yes / no)
+########################################################
+noschedule: "no"
+
+##########################################
+## accordion GPU monitoring(yes/no)
+##########################################
+{% if set_gpu_server %}
+gpu_server: "yes"
+{% else %}
+gpu_server: "no"
+{% endif %}
+
+##########################################
+## external prometheus
+##########################################
+external_prometheus: "no"
+prometheus_name: "{{ prometheus_name.stdout }}"
+prometheus_ns: "{{ prometheus_ns.stdout }}"
+
+##########################################
+# vm provisioning
+##########################################
+# Enable only when using accordion provisioning
+# uuid_enable (yes/no)
+uuid_enable: "no"
+# vm_type (vsphere/openstack)
+vm_type: vsphere
+
+##########################################
+# addon package
+##########################################
+metallb_install: "no"

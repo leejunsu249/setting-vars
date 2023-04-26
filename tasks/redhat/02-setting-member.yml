@@ -1,0 +1,591 @@
+---
+- name: Get interface
+  set_fact: acc_interface={{ ansible_default_ipv4.interface }}
+
+- name: print master_ip
+  debug: msg="{{ ansible_facts['default_ipv4']['address'] }}"
+
+- name: Get current_version
+  shell: >
+    kubectl get cm -n  acc-system acc-system-version -ojson | jq -r .data.versions |head -n1 |awk -F  version: '{print $2}' | cut -d '-' -f 2
+  register: currnet_version
+
+- name: print current_version
+  debug: msg="{{ currnet_version.stdout }}"
+
+- name: Get cluster name(member)
+  shell: >
+    kubectl get clusterinfoes | awk '{print  $1}' | grep -v NAME | tail -n 1
+  delegate_to: "{{ groups['manager-master'][0] }}"
+  register: cluster_name
+
+########################################################
+## container_name (containerd & cri-o)
+########################################################
+- name: Get cri
+  shell: >  
+     kubectl get nodes -ojson | jq -r '.items[0].status.nodeInfo.containerRuntimeVersion' |cut -d ':' -f 1
+  register: cri
+
+- name: Set cri
+  set_fact: set_cri="{{ cri.stdout }}"
+
+- name: Get enable linux (true/false)
+  shell: >
+    cat /etc/containerd/config.toml | grep enable_selinux | awk -F 'enable_selinux = ' '{print $2}'
+  register: enable_selinux
+  when: 
+    - set_cri == "containerd"
+
+- name: Set cri
+  set_fact: set_enable_selinux={{ enable_selinux.stdout }}
+  when: 
+    - set_cri == "containerd"
+
+- name: Get pids limit
+  shell: >
+    cat /etc/crio/crio.conf | grep pids_limit | awk -F 'pids_limit = ' '{ print $2 }'
+  register: pid_limit
+  when: 
+    - set_cri == "cri-o"
+
+- name: Set cri
+  set_fact: set_pid_limit="{{ pid_limit.stdout }}"
+  when: 
+    - set_cri == "cri-o"
+
+# ########################################################
+# # 3master mode( yes / no )
+# ########################################################
+- name: checking master_mode
+  shell: >
+    kubectl get nodes | grep control-plane | wc -l
+  register: master_count
+
+- name: Set master_mode
+  set_fact: set_master_mode={% if master_count.stdout | int >= 3 %}true{% else %}false{% endif %}
+
+- name: print master_mode
+  debug: msg="{{ set_master_mode }}"
+
+- name: checking keepalived exists
+  shell: >
+    podman  wait --condition=running keepalived
+  register: keepalived_check
+  ignore_errors: yes
+
+- name: cheking keepalived exists (v2.0.x)
+  shell: >
+    podman exec keepalived /bin/sh
+  register: keepalived_check2
+  ignore_errors: yes
+
+- name: Set keepalived
+  set_fact: set_keepalived={% if (keepalived_check.rc == 0) or (keepalived_check2.rc == 0) %}true{% else %}false{% endif %}
+
+- name: checking haproxy exists
+  shell: >
+    podman  wait --condition=running haproxy
+  register: haproxy_check
+  ignore_errors: yes
+
+- name: cheking haproxy exists (v2.0.x)
+  shell: >
+    podman exec haproxy /bin/sh
+  register: haproxy_check2
+  ignore_errors: yes
+
+- name: Set L4_mode
+  set_fact: set_L4_mode={% if (haproxy_check.rc == 0) or (haproxy_check2.rc == 0) %}haproxy{% else %}L4{% endif %}
+  
+- name: print L4_mode
+  debug: msg="{{ set_L4_mode }}"
+
+- name: Get haproxy_port
+  shell: >
+    cat /etc/haproxy/haproxy.cfg | grep -A2 kube-apiserver-https | grep bind | awk -F 'bind :' '{print $2}'
+  register: haproxy_port
+  when:
+    - set_master_mode == true
+    - set_L4_mode == "haproxy"
+
+- name: Set haproxy_port
+  set_fact: set_haproxy_port="{{haproxy_port.stdout}}"
+  when:
+    - set_master_mode == true
+    - set_L4_mode == "haproxy"
+
+
+- name: Set single_option
+  set_fact: set_single_option={% if set_keepalived and (master_count.stdout | int == 1) %}true{% else %}false{% endif %}
+
+- name: Get master ip
+  shell: >
+    kubectl get nodes -owide |awk '{print $6}' | grep -v INTERNAL-IP
+  register: master_ips
+  when:
+    - set_master_mode == true
+
+- name: Split master_ips
+  set_fact: splits_master_ips={{ master_ips.stdout.split("\n") }}
+  when:
+    - set_master_mode == true  
+    - set_single_option == false
+
+- name: Set master2_ip
+  set_fact: set_master2_ip={{ splits_master_ips[1] }}
+  when:
+    - set_master_mode == true  
+    - set_single_option == false 
+
+- name: Set master3_ip
+  set_fact: set_master3_ip={{ splits_master_ips[2] }}
+  when:
+    - set_master_mode == true  
+    - set_single_option == false
+
+- name: Get master hostnames
+  shell: >
+    kubectl get nodes -owide |awk '{print $1}' | grep -v NAME
+  register: master_hostnames
+
+- name: Split master_hostnames
+  set_fact: splits_master_hostnames={{ master_hostnames.stdout.split("\n") }}
+
+- name: Set master1_hostname
+  set_fact: set_master1_hostname={{ splits_master_hostnames[0] }}
+
+- name: Set master2_hostname
+  set_fact: set_master2_hostname={{ splits_master_hostnames[1] }}
+  when:
+    - set_master_mode == true
+    - set_single_option == false
+
+- name: Set master3_hostname
+  set_fact: set_master3_hostname={{ splits_master_hostnames[2] }}
+  when:
+    - set_master_mode == true  
+    - set_single_option == false
+
+- name: Get keep_vip
+  shell: >
+    podman inspect keepalived | jq -r .[0].Config.Env[] | grep KEEPALIVED_VIRTUAL_IPS | awk -F KEEPALIVED_VIRTUAL_IPS=#PYTHON2BASH: '{print $2}' | sed  's/[][]//g' | tr -d "'"
+  register: keep_vip
+  when:
+    - set_keepalived == true
+
+- name: Set keep_vip
+  set_fact: set_keep_vip="{{ keep_vip.stdout }}"
+  when:
+    - set_keepalived == true
+
+########################################################
+# storage setting
+########################################################
+- name: check NFS deployment
+  shell: >
+    kubectl wait --for condition=Available=True  deployment/accordion-data-provisioner -n acc-system
+  register: result
+  ignore_errors: yes
+
+- name: Set storage_option
+  set_fact: set_storage_option={% if result.rc == 0 %}nfs{% else %}ceph{% endif %}
+
+- name: Get NFS server ip
+  shell: > 
+    kubectl get deployments.apps -n acc-system accordion-data-provisioner -ojson |jq -r '.spec.template.spec.containers[0].env[]| select(.name=="NFS_SERVER").value'
+  register: nfs_server_ip
+  when: 
+    -  set_storage_option ==  "nfs"
+
+- name: Set NFS server ip
+  set_fact: set_nfs_server_ip="{{ nfs_server_ip.stdout }}"
+  when: 
+    -  set_storage_option ==  "nfs"
+
+- name: Get accordion_nfs_path
+  shell: >
+     kubectl get deployments.apps -n acc-system accordion-data-provisioner -ojson |jq -r '.spec.template.spec.containers[0].env[]| select(.name=="NFS_PATH").value' | sed -e 's#/{{ cluster_name.stdout }}##g'
+  register: accordion_nfs_path
+  when: 
+    -  set_storage_option ==  "nfs"
+
+- name: Set accordion_nfs_path
+  set_fact: set_accordion_nfs_path="{{ accordion_nfs_path.stdout }}"
+  when: 
+    -  set_storage_option ==  "nfs"
+
+- name: Get nfs_version
+  shell: >
+     kubectl get storageclass accordion-storage  -ojson | jq -r .mountOptions | awk -F nfsvers= '{print $2}'
+  register: nfs_version
+  when: 
+    -  set_storage_option ==  "nfs"
+
+- name: Set nfs_version
+  set_fact: set_nfs_version={% if nfs_version == 4 %}"v4"{% else %}"v3"{% endif %}
+  when: 
+    -  set_storage_option ==  "nfs"
+
+- name: set nfs_setup
+  set_fact: set_nfs_setup={% if nfs_server_ip.stdout == ansible_facts['default_ipv4']['address'] %}internal{% else %}external{% endif %}
+  when: 
+    -  set_storage_option ==  "nfs"
+- name: Get ceph option
+  shell: >
+    kubectl get sc accordion-storage -ojson|jq -r .provisioner | cut -d '.' -f1
+  register: ceph_option
+  when: 
+    -  set_storage_option ==  "ceph"
+
+- name: Set ceph option
+  set_fact: set_ceph_option={% if ceph_option.stdout == "cephfs" %}cephfs{%else%}rbd{% endif %}
+  when: 
+    -  set_storage_option ==  "ceph"
+
+- name: Get ceph fsid
+  shell: >
+     kubectl get cm -n acc-system ceph-csi-config -ojson |jq -r '.data."config.json"' | sed 's/[][]//g'| jq -r .clusterID
+  register: ceph_fsid
+  when: 
+    -  set_storage_option ==  "ceph"
+
+- name: Get ceph server ip
+  shell: >
+     kubectl get cm -n acc-system ceph-csi-config -ojson |jq -r '.data."config.json"' |  sed  's/[][]//g'| jq -r .monitors | cut -d ":" -f 1
+  register: ceph_server_ip
+  when: 
+    -  set_storage_option ==  "ceph"
+
+- name: Get ceph server port
+  shell: >
+     kubectl get cm -n acc-system ceph-csi-config -ojson |jq -r '.data."config.json"' |  sed  's/[][]//g'| jq -r .monitors | cut -d ":" -f 2
+  register: ceph_server_port
+  when: 
+    -  set_storage_option ==  "ceph"
+
+- name: Get ceph userID
+  shell: >
+    kubectl get secrets -n acc-system csi-{{ set_ceph_option }}-secret -ojson |jq -r .data.userID | base64 -d
+  register: ceph_id
+  when: 
+    -  set_storage_option ==  "ceph"
+
+- name: Get ceph userkey
+  shell: >
+     kubectl get secrets -n acc-system csi-{{ set_ceph_option }}-secret -ojson |jq -r .data.userKey | base64 -d
+  register: ceph_key
+  when: 
+    -  set_storage_option ==  "ceph"
+
+- name: Get ceph fsName
+  shell: >
+    kubectl get sc accordion-storage -ojson | jq -r .parameters.fsName
+  register: ceph_fsname
+  when: 
+    -  set_storage_option ==  "ceph"
+
+# ########################################################
+# # etcd external option
+# ########################################################
+- name: etcd check
+  shell: 
+    kubectl wait --for=condition=ready pod/etcd-{{ ansible_facts['hostname'] }} -n kube-system
+  register: result
+
+- name: Set etcd result
+  set_fact: set_etcd_external={% if result.rc == 0 %}false{% else %}true{% endif %}
+
+########################################################
+# user registry
+########################################################
+- name: Get user_registry server
+  shell: >
+     kubectl get registries.management.accordions.co.kr user-registry -ojson |jq -r .entry.server | base64 -d | awk -F https:// '{print $2}'| cut -d ':' -f  1 
+  register: user_registry
+
+- name: Set user_registry server
+  set_fact: set_user_registry={{ user_registry.stdout }}
+
+- name: Get user_registry server(v2.2.x)
+  shell: > 
+    kubectl get registries.management.accordions.co.kr user-registry -ojson |jq -r .entry.server | base64 -d | cut -d ':' -f  1
+  register: user_registry2
+
+- name: check domain option
+  set_fact: set_domain_option={% if ( user_registry.stdout is match("^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$")) or (user_registry2.stdout is match("^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$")) %}false{% else %}true{% endif %}
+
+- name:  Get user_registry port
+  shell: >
+    kubectl get registries.management.accordions.co.kr user-registry -ojson |jq -r .entry.server | base64 -d | awk -F https:// '{print $2}'| cut -d ':' -f  2
+  register: user_registry_port
+
+- name:  Get user_registry port2
+  shell: >
+    kubectl get registries.management.accordions.co.kr user-registry -ojson |jq -r .entry.server | base64 -d |cut -d ':' -f  2
+  register: user_registry_port2
+
+- name: check user-registry condition
+  shell: >
+    kubectl wait --for condition=Available=True  deployment/user-registry -n acc-system
+  register: user_registry_result
+  ignore_errors: yes
+
+- name: check harbor registry condition
+  shell: > 
+    kubectl wait --for condition=Available=True  deployment/harbor-registry -n acc-system
+  register: harbor_registry_result
+  ignore_errors: yes
+
+- name: Set user_registry_external
+  set_fact: set_user_registry_external={% if (user_registry_result.rc == 0) or (harbor_registry_result.rc == 0) %}true{% else %}false{% endif %}
+
+- name: Set user_registry_option
+  set_fact: set_user_registry_option={% if user_registry_result.rc == 0 %}registry{% else %}harbor{% endif %}
+
+- name: Get username
+  shell: >
+    kubectl get registries.management.accordions.co.kr user-registry -ojson | jq -r .entry.username | base64 -d
+  register: user_registry_id
+
+- name: Get userpassword
+  shell: >
+    kubectl get registries.management.accordions.co.kr user-registry -ojson | jq -r .entry.password | base64 -d
+  register: user_registry_pw
+
+########################################################
+# base registry
+########################################################
+- name: Check registry eixsts
+  shell: >
+    podman  wait --condition=running registry
+  register: registry_result
+  ignore_errors: yes
+
+- name: Check registry eixsts(v2.0.2)
+  shell: >
+    podman exec registry /bin/sh
+  register: registry_result2
+  ignore_errors: yes
+
+- name: Set base_registry_option
+  set_fact: set_base_registry_option={% if (registry_result.rc == 0) or (registry_result2.rc == 0) %}local{% else %}external{% endif %}
+
+- name: Get registry server
+  shell:
+     kubectl get registries.management.accordions.co.kr infra-registry -ojson |jq -r .entry.server | base64 -d | cut -d ':' -f 1
+  register: registry_address
+  when:
+    - set_domain_option == false
+
+- name: Get registry port
+  shell: 
+    kubectl get registries.management.accordions.co.kr infra-registry -ojson |jq -r .entry.server | base64 -d | cut -d ':' -f 2
+  register: registry_port
+  when:
+    - set_domain_option == false
+
+#######################################################
+# registry domain option
+########################################################
+- name: Get base registry server(domain)
+  shell:
+     kubectl get registries.management.accordions.co.kr infra-registry -ojson |jq -r .entry.server | base64 -d |awk -F https:// '{print $2}'| cut -d ':' -f 1
+  register: registry_address_domain
+  when:
+    - set_domain_option == true
+
+- name: Get base registry server(v2.4.0)
+  shell: 
+    kubectl get registries.management.accordions.co.kr infra-registry -ojson |jq -r .entry.server | base64 -d | cut -d ':' -f 1
+  register: registry_address_domain2
+  when:
+    - set_domain_option == true
+
+- name: Get registry port(domain)
+  shell: 
+    kubectl get registries.management.accordions.co.kr infra-registry -ojson |jq -r .entry.server | base64 -d | awk -F https:// '{print $2}'| cut -d ':' -f 2
+  register: registry_port_domain
+  when:
+    - set_domain_option == true
+
+- name: Get base registry port(v2.4.0)
+  shell: 
+    kubectl get registries.management.accordions.co.kr infra-registry -ojson |jq -r .entry.server | base64 -d | cut -d ':' -f 2
+  register: registry_port_domain2
+  when:
+    - set_domain_option == true
+
+########################################################
+# Network Setting
+########################################################
+- name: Get network CNI
+  shell: >
+    kubectl get ds -n kube-system  | grep -e calico -e weave | awk '{print $1}' | cut -d '-' -f1
+  register: cni
+
+- name:  Get podman cidr
+  shell:  >
+    podman  network inspect podman | jq -r .[0].plugins[0].ipam.ranges[0][0].subnet
+  register: podman_cidr
+
+- name: Get pod_network_cidr
+  shell: >
+     kubectl cluster-info dump | grep -m 1 -E "cluster-cidr" | awk -F "--cluster-cidr=" '{print $2}' | sed 's/",//'
+  register: pod_network_cidr
+
+- name: print pod_network_cidr
+  debug: msg="{{ pod_network_cidr.stdout }}"
+
+- name: Get calico backend
+  vars:
+    var_network_cni: "{{ cni.stdout }}"
+  shell: >
+     kubectl get cm -n kube-system calico-config -ojson | jq -r .data.calico_backend
+  register: calico_backend
+  when:
+    - var_network_cni == "calico"
+
+- name: Set calico backend
+  vars:
+    var_network_cni: "{{ cni.stdout }}"
+  set_fact: set_calico_backend={% if calico_backend.stdout == "bird" %}IPIP{% else %}vxlan{% endif %}
+  when:
+    - var_network_cni == "calico"
+
+- name: Get calico_autodetection_mode
+  vars:
+    var_network_cni: "{{ cni.stdout }}"
+  shell: >
+     kubectl get ds -n kube-system calico-node -ojson | jq -r '.spec.template.spec.containers[0].env[]| select(.name=="IP_AUTODETECTION_METHOD").value' | cut -d '=' -f 1
+  register: ip_autodetection_method
+  when:
+    - var_network_cni == "calico"
+
+- name: Get CALICO_IPV4POOL_IPIP
+  vars:
+    var_network_cni: "{{ cni.stdout }}"
+  shell: >
+     kubectl get ds -n kube-system calico-node -ojson | jq -r '.spec.template.spec.containers[0].env[] | select(.name=="CALICO_IPV4POOL_IPIP")'.value
+  register: calico_ippool
+  when:
+    - var_network_cni == "calico"
+
+- name: Set calico_autodetection_mode
+  vars:
+    var_network_cni: "{{ cni.stdout }}"
+  set_fact: set_calico_autodetection_mode={% if ip_autodetection_method.stdout == "cidr" %}"cidr"{% else %}"interface"{% endif %}
+  when:
+    - var_network_cni == "calico"
+
+- name: Get interfacce_cidr
+  vars:
+    var_network_cni: "{{ cni.stdout }}"
+    var_calico_autodetection_mode: "set_calico_autodetection_mode"
+  shell: >
+    kubectl get ds -n kube-system calico-node -ojson | jq -r '.spec.template.spec.containers[0].env[]| select(.name=="IP_AUTODETECTION_METHOD").value' | cut -d '=' -f 2
+  register: interface_cidr
+  when:
+    - var_network_cni == "calico"
+    - var_calico_autodetection_mode ==  "cidr"
+
+- name: Get weavenet IPALLOC_RANGE
+  vars:
+    var_network_cni: "{{ cni.stdout }}"
+  shell: >
+    kubectl get ds -n kube-system weave-net -ojson | jq -r '.spec.template.spec.containers[].env[]|select(.name=="IPALLOC_RANGE").value'
+  register: ipalloc_range
+  when:
+    - var_network_cni == "weave"
+
+- name: Get service_cidr
+  shell: >
+    kubectl cluster-info dump | grep -m 1 -E "service-cluster-ip-range" | awk -F "--service-cluster-ip-range=" '{print $2}' | sed 's/",//'
+  register: service_cidr
+
+- name: Get kubelet cluster dns
+  shell: >
+    cat /var/lib/kubelet/config.yaml | grep -A1 clusterDNS | tail -n1 | awk -F - '{ gsub(/ /, ""); print $2}'
+  register: kubelet_clusterdns
+
+- name: Get kubernetes cluster ip
+  shell: >
+    kubectl get svc kubernetes | awk '{print $3}' | grep -v CLUSTER-IP
+  register: kubernetes_clusterip
+
+- name:  Get proxy mode
+  shell: >
+    kubectl get cm -n kube-system kube-proxy -ojson | jq -r '.data."config.conf"'| grep mode | awk -F mode: '{gsub(/ /,""); gsub(/"/,""); print $2}'
+  register: proxy_mode
+
+- name: Set proxy mode
+  set_fact: set_proxy_mode={% if proxy_mode.stdout == "ipvs" %}"ipvs"{% else %}"iptables"{% endif %}
+
+########################################################
+## container dir
+########################################################
+- name: Get containerd run root
+  vars:
+    var_cri: "{{ cri.stdout }}"
+  shell: >
+    cat /etc/containerd/config.toml | grep 'root' |head -n 1 | cut -d '=' -f 2 |tr -d '"' | tr -d " "
+  register: containerd_root_dir
+  when: 
+    - var_cri == "containerd"
+
+- name: Get containers storage runroot
+  shell: >
+     sed -n s/'runroot = '//p  /etc/containers/storage.conf  | tr -d '"'
+  register: containers_storage_runroot
+
+- name: Get containers storage volume
+  shell: >
+    sed  -n s/'graphroot = '//p  /etc/containers/storage.conf  | tr -d '"'
+  register: containers_storage_volume
+    
+########################################################
+# external IP
+########################################################
+- name:  Get external IP
+  shell: >
+    kubectl get svc kubernetes | awk '{print $4}' | grep -v EXTERNAL-IP
+  register: external_ip
+
+- name: Set external IP
+  set_fact: set_external_ip={% if external_ip.stdout == "<none>" %}"127.0.0.1"{% else %}"{{external_ip.stdout}}"{% endif %}
+
+##########################################
+## accordion GPU monitoring
+##########################################
+- name:  Get GPU num
+  shell: >
+    kubectl get nodes "-o=custom-columns=NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu" | grep -v \<none\> | grep -v NAME | wc -l
+  register: gpu_num
+
+- name: Set gpu_server
+  set_fact: set_gpu_server={% if gpu_num.stdout == "0" %}false{% else %}true{% endif %}
+
+##########################################
+## external prometheus
+##########################################
+- name: Get prometheus ns
+  shell: >
+    kubectl get prometheus -A | awk '{print $1}' | grep -v NAMESPACE
+  register: prometheus_ns
+
+- name: Get prometheus name
+  shell: >
+    kubectl get prometheus -A | awk '{print $2}' | grep -v NAME
+  register: prometheus_name
+
+##########################################
+## setting
+##########################################
+- name: setting
+  template:
+    src: "{{ item }}"
+    dest: "{{ role_path }}/../../group_vars/"
+  delegate_to: "{{ groups['local'][0] }}"
+  with_items:
+    - member.yml
+    

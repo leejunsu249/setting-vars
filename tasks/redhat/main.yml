@@ -1,0 +1,10 @@
+---
+- name: setting (manager)
+  include_tasks: 01-setting-host.yml
+  when:
+    - inventory_hostname in groups['manager-master']
+
+- name: setting (member)
+  include_tasks: 02-setting-member.yml
+  when:
+    - inventory_hostname in groups['member-master']
